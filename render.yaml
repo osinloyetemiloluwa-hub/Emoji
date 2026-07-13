@@ -1,0 +1,51 @@
+# Render.com Blueprint - Discord Emoji Bot
+# https://render.com/docs/deploy-phrase-app
+
+# IMPORTANT: Discord bots require 24/7 uptime
+# Free tier sleeps after 15 min → Bot disconnects from Discord
+# RECOMMENDED: Use Starter plan ($7/month) for reliable hosting
+
+services:
+  # Main Bot Service
+  - type: web
+    name: discord-emoji-bot
+    env: node
+    region: oregon  # Options: oregon, frankfurt, singapore, ohio, ireland
+    plan: free  # ⚠️ CHANGE TO "starter" ($7/mo) FOR 24/7 UPTIME
+
+    # Build & Start
+    buildCommand: npm install
+    startCommand: npm start
+
+    # Health check - prevents Render from marking service as unhealthy
+    healthCheckPath: /health
+
+    # Auto-deploy from main branch
+    autoDeploy: true
+
+    # Environment Variables (SET IN RENDER DASHBOARD)
+    # DO NOT commit real tokens to this file!
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DISCORD_TOKEN
+        sync: false  # Set in Render Dashboard
+      - key: SOURCE_SERVER_ID
+        sync: false  # Set in Render Dashboard
+      - key: BOT_OWNER_ID
+        sync: false  # Set in Render Dashboard
+      - key: EMOJI_PREFIX
+        value: "!"
+      - key: PORT
+        value: "3000"
+
+# Alternative: Keepalive Cron (only works with Starter plan)
+# Uncomment if using Starter plan
+#
+# services:
+#   - type: cron
+#     name: keepalive
+#     region: oregon
+#     schedule: "*/14 * * * *"  # Every 14 minutes
+#     plan: free
+#     command: curl -f https://your-bot.onrender.com/health || true
