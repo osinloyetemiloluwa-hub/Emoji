@@ -81,6 +81,24 @@ async function downloadEmojiImage(emoji) {
   }
 }
 
+// NEW: download image from URL or buffer (for manual add)
+async function downloadImageFromUrl(url) {
+  try {
+    const response = await axios.get(url, { responseType: 'arraybuffer' });
+    const buffer = Buffer.from(response.data);
+    // Detect animated by checking first 6 bytes for GIF signature
+    const isGif = buffer.length > 6 &&
+      buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 &&
+      (buffer[3] === 0x38 && (buffer[4] === 0x37 || buffer[4] === 0x39) && buffer[5] === 0x61);
+    const contentType = response.headers['content-type'] || '';
+    const isAnimated = isGif || contentType.includes('gif') || url.toLowerCase().endsWith('.gif');
+    return { buffer, animated: isAnimated };
+  } catch (error) {
+    console.error('❌ Failed to download image:', error.message);
+    return null;
+  }
+}
+
 // Sync emoji from source server
 async function syncEmoji() {
   const sourceServer = getSourceServer();
@@ -172,6 +190,44 @@ async function useEmojiInServer(guild, emojiName) {
   }
 }
 
+// NEW: Add an emoji to the local database manually (owner only)
+async function addEmojiToDatabase(name, imageBuffer, animated = false) {
+  // Validate name (Discord emoji name rules: alphanumeric + underscore, max 32 chars)
+  const cleanName = name.toLowerCase().replace(/[^a-z0-9_]/g, '');
+  if (!cleanName || cleanName.length > 32) {
+    return { success: false, error: 'Invalid emoji name. Use 1-32 alphanumeric characters and underscores.' };
+  }
+  if (syncedEmoji.has(cleanName)) {
+    return { success: false, error: `Emoji "${cleanName}" already exists in database.` };
+  }
+
+  // Generate a fake ID for storage (since we don't have a real Discord emoji ID)
+  const fakeId = `manual_${Date.now().toString(36)}`;
+
+  syncedEmoji.set(cleanName, {
+    name: cleanName,
+    id: fakeId,
+    animated: animated,
+    image: imageBuffer.toString('base64'),
+    requiresColons: true,
+    createdAt: new Date().toISOString()
+  });
+
+  saveEmojiData();
+  return { success: true, name: cleanName };
+}
+
+// NEW: Delete an emoji from the local database (owner only)
+function deleteEmojiFromDatabase(name) {
+  const lowerName = name.toLowerCase();
+  if (!syncedEmoji.has(lowerName)) {
+    return { success: false, error: `Emoji "${name}" not found in database.` };
+  }
+  syncedEmoji.delete(lowerName);
+  saveEmojiData();
+  return { success: true };
+}
+
 // Event: Bot ready
 client.once('ready', async () => {
   console.log(`
@@ -246,6 +302,36 @@ async function registerSlashCommands() {
       .addStringOption(option =>
         option.setName('name')
           .setDescription('Emoji name')
+          .setRequired(true)
+          .setAutocomplete(true)
+      )
+      .toJSON(),
+    // NEW: Owner-only commands to manage bot's local database
+    new SlashCommandBuilder()
+      .setName('bot-add-emoji')
+      .setDescription('[Owner] Add an emoji to bot database')
+      .addStringOption(option =>
+        option.setName('name')
+          .setDescription('Emoji name (alphanumeric, underscores)')
+          .setRequired(true)
+      )
+      .addStringOption(option =>
+        option.setName('url')
+          .setDescription('Image URL (or use attachment)')
+          .setRequired(false)
+      )
+      .addAttachmentOption(option =>
+        option.setName('attachment')
+          .setDescription('Upload an image file')
+          .setRequired(false)
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('bot-delete-emoji')
+      .setDescription('[Owner] Delete an emoji from bot database')
+      .addStringOption(option =>
+        option.setName('name')
+          .setDescription('Emoji name to delete')
           .setRequired(true)
           .setAutocomplete(true)
       )
@@ -370,6 +456,70 @@ client.on('interactionCreate', async (interaction) => {
         });
         break;
       }
+
+      // NEW: Handle bot-add-emoji
+      case 'bot-add-emoji': {
+        if (interaction.user.id !== CONFIG.botOwnerId) {
+          return interaction.reply({ content: '❌ Only the bot owner can use this command!', ephemeral: true });
+        }
+
+        const name = interaction.options.getString('name');
+        const url = interaction.options.getString('url');
+        const attachment = interaction.options.getAttachment('attachment');
+
+        // Must provide either URL or attachment
+        if (!url && !attachment) {
+          return interaction.reply({ content: '❌ Please provide either a URL or upload an image attachment.', ephemeral: true });
+        }
+
+        // If both provided, prefer attachment
+        let imageBuffer, animated = false;
+        if (attachment) {
+          // Download attachment
+          try {
+            const response = await axios.get(attachment.url, { responseType: 'arraybuffer' });
+            imageBuffer = Buffer.from(response.data);
+            // Detect animated GIF
+            const isGif = imageBuffer.length > 6 &&
+              imageBuffer[0] === 0x47 && imageBuffer[1] === 0x49 && imageBuffer[2] === 0x46 &&
+              (imageBuffer[3] === 0x38 && (imageBuffer[4] === 0x37 || imageBuffer[4] === 0x39) && imageBuffer[5] === 0x61);
+            animated = isGif || attachment.contentType?.includes('gif') || attachment.name?.toLowerCase().endsWith('.gif');
+          } catch (error) {
+            return interaction.reply({ content: `❌ Failed to download attachment: ${error.message}`, ephemeral: true });
+          }
+        } else if (url) {
+          const result = await downloadImageFromUrl(url);
+          if (!result) {
+            return interaction.reply({ content: '❌ Failed to download image from the provided URL.', ephemeral: true });
+          }
+          imageBuffer = result.buffer;
+          animated = result.animated;
+        }
+
+        // Add to database
+        const addResult = await addEmojiToDatabase(name, imageBuffer, animated);
+        if (!addResult.success) {
+          return interaction.reply({ content: `❌ ${addResult.error}`, ephemeral: true });
+        }
+
+        await interaction.reply(`✅ Emoji \`${addResult.name}\` added to bot database (animated: ${animated ? 'yes' : 'no'}).`);
+        break;
+      }
+
+      // NEW: Handle bot-delete-emoji
+      case 'bot-delete-emoji': {
+        if (interaction.user.id !== CONFIG.botOwnerId) {
+          return interaction.reply({ content: '❌ Only the bot owner can use this command!', ephemeral: true });
+        }
+
+        const name = interaction.options.getString('name');
+        const result = deleteEmojiFromDatabase(name);
+        if (!result.success) {
+          return interaction.reply({ content: `❌ ${result.error}`, ephemeral: true });
+        }
+        await interaction.reply(`✅ Emoji \`${name}\` deleted from bot database.`);
+        break;
+      }
     }
   } catch (error) {
     console.error('Command error:', error);
@@ -398,6 +548,67 @@ client.on('messageCreate', async (message) => {
       ? `✅ Synced ${result.count} emojis!`
       : `❌ Sync failed: ${result.error}`
     );
+    return;
+  }
+
+  // NEW: Owner-only commands for database management
+  if (command === 'botadd' || command === 'botaddemoji') {
+    if (message.author.id !== CONFIG.botOwnerId) {
+      return message.reply('❌ Only the bot owner can use this command!');
+    }
+    // Usage: !botadd <name> <url>  (or attach an image and provide name)
+    const name = args[0];
+    if (!name) {
+      return message.reply('❌ Usage: `!botadd <name> <url>` or attach an image and use `!botadd <name>`');
+    }
+    let url = args[1];
+    // Check for attachment
+    let attachment = message.attachments.first();
+    let imageBuffer, animated = false;
+
+    if (attachment) {
+      try {
+        const response = await axios.get(attachment.url, { responseType: 'arraybuffer' });
+        imageBuffer = Buffer.from(response.data);
+        const isGif = imageBuffer.length > 6 &&
+          imageBuffer[0] === 0x47 && imageBuffer[1] === 0x49 && imageBuffer[2] === 0x46 &&
+          (imageBuffer[3] === 0x38 && (imageBuffer[4] === 0x37 || imageBuffer[4] === 0x39) && imageBuffer[5] === 0x61);
+        animated = isGif || attachment.contentType?.includes('gif') || attachment.name?.toLowerCase().endsWith('.gif');
+      } catch (error) {
+        return message.reply(`❌ Failed to download attachment: ${error.message}`);
+      }
+    } else if (url) {
+      const result = await downloadImageFromUrl(url);
+      if (!result) {
+        return message.reply('❌ Failed to download image from the provided URL.');
+      }
+      imageBuffer = result.buffer;
+      animated = result.animated;
+    } else {
+      return message.reply('❌ Please provide a URL or attach an image.');
+    }
+
+    const addResult = await addEmojiToDatabase(name, imageBuffer, animated);
+    if (!addResult.success) {
+      return message.reply(`❌ ${addResult.error}`);
+    }
+    await message.reply(`✅ Emoji \`${addResult.name}\` added to bot database (animated: ${animated ? 'yes' : 'no'}).`);
+    return;
+  }
+
+  if (command === 'botdel' || command === 'botdelete') {
+    if (message.author.id !== CONFIG.botOwnerId) {
+      return message.reply('❌ Only the bot owner can use this command!');
+    }
+    const name = args[0];
+    if (!name) {
+      return message.reply('❌ Usage: `!botdel <name>`');
+    }
+    const result = deleteEmojiFromDatabase(name);
+    if (!result.success) {
+      return message.reply(`❌ ${result.error}`);
+    }
+    await message.reply(`✅ Emoji \`${name}\` deleted from bot database.`);
     return;
   }
 
@@ -487,12 +698,18 @@ client.on('messageCreate', async (message) => {
 \`${CONFIG.prefix}add <name>\` - Add emoji to server
 \`${CONFIG.prefix}use <name>\` - Use emoji in chat
 
+🔧 **Bot Database Management** (Owner only)
+\`${CONFIG.prefix}botadd <name> <url>\` or attach image - Add emoji to bot database
+\`${CONFIG.prefix}botdel <name>\` - Delete emoji from bot database
+
 ⚡ **Slash Commands**
 \`/sync-emojis\` - Sync emoji (admin)
 \`/list-emojis\` - List all emoji
 \`/add-emoji <name>\` - Add emoji to server
 \`/use-emoji <name>\` - Use emoji
 \`/emoji-info <name>\` - Get emoji info
+\`/bot-add-emoji\` - [Owner] Add emoji to bot database
+\`/bot-delete-emoji\` - [Owner] Delete emoji from bot database
           `,
           color: 0x5865F2
         }]
@@ -506,7 +723,7 @@ client.on('messageCreate', async (message) => {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isAutocomplete()) return;
 
-  if (['add-emoji', 'use-emoji', 'emoji-info'].includes(interaction.commandName)) {
+  if (['add-emoji', 'use-emoji', 'emoji-info', 'bot-delete-emoji'].includes(interaction.commandName)) {
     const focused = interaction.options.getFocused();
     const choices = Array.from(syncedEmoji.keys())
       .filter(name => name.toLowerCase().includes(focused.toLowerCase()))
