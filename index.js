@@ -5,14 +5,13 @@ import {
   Collection,
   SlashCommandBuilder,
   REST,
-  Routes,
-  AttachmentBuilder
+  Routes
 } from 'discord.js';
 import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import http from 'http'; // <-- For health check server
+import http from 'http';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,7 +25,7 @@ const CONFIG = {
   emojiLimit: 50
 };
 
-// ----- HTTP Server for health checks (keeps Render happy) -----
+// HTTP Server for health checks
 const server = http.createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -41,7 +40,6 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`🌐 Health check server running on port ${PORT}`);
 });
-// --------------------------------------------------------------
 
 // Initialize Discord client
 const client = new Client({
@@ -55,6 +53,11 @@ const client = new Client({
 
 // Store synced emoji data
 const syncedEmoji = new Collection();
+
+// Helper: Format emoji for display (animated vs static)
+function formatEmoji(e) {
+  return `${e.animated ? '<a:' : '<:'}${e.name}:${e.id}>`;
+}
 
 // Load saved emoji data
 function loadEmojiData() {
@@ -88,7 +91,7 @@ function getSourceServer() {
   return client.guilds.cache.get(CONFIG.sourceServerId);
 }
 
-// Download emoji image (for syncing from source server)
+// Download emoji image
 async function downloadEmojiImage(emoji) {
   try {
     const response = await axios.get(emoji.url, { responseType: 'arraybuffer' });
@@ -99,9 +102,8 @@ async function downloadEmojiImage(emoji) {
   }
 }
 
-// ---- Improved downloadImageFromUrl (fixes "Invalid URL") ----
+// Download image from URL
 async function downloadImageFromUrl(url) {
-  // Trim and remove surrounding angle brackets
   let cleanUrl = url.trim();
   if (cleanUrl.startsWith('<') && cleanUrl.endsWith('>')) {
     cleanUrl = cleanUrl.slice(1, -1);
@@ -119,11 +121,15 @@ async function downloadImageFromUrl(url) {
       timeout: 10000
     });
     const buffer = Buffer.from(response.data);
+
+    // Check if GIF by magic bytes
     const isGif = buffer.length > 6 &&
       buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 &&
       (buffer[3] === 0x38 && (buffer[4] === 0x37 || buffer[4] === 0x39) && buffer[5] === 0x61);
+
     const contentType = response.headers['content-type'] || '';
     const isAnimated = isGif || contentType.includes('gif') || cleanUrl.toLowerCase().endsWith('.gif');
+
     return { buffer, animated: isAnimated };
   } catch (error) {
     console.error(`❌ Failed to download image from URL: ${cleanUrl}`, error.message);
@@ -133,9 +139,8 @@ async function downloadImageFromUrl(url) {
     return null;
   }
 }
-// ----------------------------------------------------------
 
-// Sync emoji from source server
+// Sync ALL emoji from source server (animated + static)
 async function syncEmoji() {
   const sourceServer = getSourceServer();
   if (!sourceServer) {
@@ -144,12 +149,14 @@ async function syncEmoji() {
   }
 
   const emojis = await sourceServer.emojis.fetch();
-  const animatedEmojis = emojis.filter(e => e.animated);
+  // Sync ALL emojis, not just animated
+  const allEmojis = emojis;
 
-  console.log(`\n🔄 Syncing ${animatedEmojis.size} animated emojis from ${sourceServer.name}...`);
+  console.log(`\n🔄 Syncing ${allEmojis.size} emojis from ${sourceServer.name}...`);
+  console.log(`   (Animated: ${emojis.filter(e => e.animated).size}, Static: ${emojis.filter(e => !e.animated).size})`);
 
   let synced = 0;
-  for (const [id, emoji] of animatedEmojis) {
+  for (const [id, emoji] of allEmojis) {
     try {
       const imageBuffer = await downloadEmojiImage(emoji);
       if (imageBuffer) {
@@ -170,7 +177,7 @@ async function syncEmoji() {
   }
 
   saveEmojiData();
-  console.log(`✅ Successfully synced ${synced}/${animatedEmojis.size} emojis!\n`);
+  console.log(`✅ Successfully synced ${synced}/${allEmojis.size} emojis!\n`);
   return { success: true, count: synced };
 }
 
@@ -316,7 +323,9 @@ client.on('interactionCreate', async (interaction) => {
         const search = interaction.options.getString('search')?.toLowerCase();
         let emojis = Array.from(syncedEmoji.values()).filter(e => search ? e.name.toLowerCase().includes(search) : true);
         if (emojis.length === 0) return interaction.reply('❌ No emojis found!');
-        const list = emojis.slice(0, 25).map(e => `<a:${e.name}:${e.id}> \`${e.name}\``).join('\n');
+
+        // Use helper function for correct format (animated vs static)
+        const list = emojis.slice(0, 25).map(e => `${formatEmoji(e)} \`${e.name}\``).join('\n');
         const more = emojis.length > 25 ? `\n*...and ${emojis.length - 25} more*` : '';
         await interaction.reply({ embeds: [{ title: `🎭 Synced Emojis (${emojis.length})`, description: list + more, color: 0x5865F2 }] });
         break;
@@ -342,9 +351,9 @@ client.on('interactionCreate', async (interaction) => {
           title: `🎭 ${emojiData.name}`,
           fields: [
             { name: 'ID', value: `\`${emojiData.id}\``, inline: true },
-            { name: 'Animated', value: emojiData.animated ? '✅ Yes' : '❌ No', inline: true },
+            { name: 'Type', value: emojiData.animated ? '🎬 Animated' : '🖼️ Static', inline: true },
             { name: 'Created', value: new Date(emojiData.createdAt).toLocaleDateString(), inline: true },
-            { name: 'Format', value: `<a:${emojiData.name}:${emojiData.id}>`, inline: false }
+            { name: 'Format', value: formatEmoji(emojiData), inline: false }
           ],
           color: 0x5865F2
         }] });
@@ -362,7 +371,9 @@ client.on('interactionCreate', async (interaction) => {
           try {
             const resp = await axios.get(attachment.url, { responseType: 'arraybuffer' });
             imageBuffer = Buffer.from(resp.data);
-            const isGif = imageBuffer.length > 6 && imageBuffer[0] === 0x47 && imageBuffer[1] === 0x49 && imageBuffer[2] === 0x46 && (imageBuffer[3] === 0x38 && (imageBuffer[4] === 0x37 || imageBuffer[4] === 0x39) && imageBuffer[5] === 0x61);
+            // Check GIF magic bytes
+            const isGif = imageBuffer.length > 6 && imageBuffer[0] === 0x47 && imageBuffer[1] === 0x49 && imageBuffer[2] === 0x46 &&
+              (imageBuffer[3] === 0x38 && (imageBuffer[4] === 0x37 || imageBuffer[4] === 0x39) && imageBuffer[5] === 0x61);
             animated = isGif || attachment.contentType?.includes('gif') || attachment.name?.toLowerCase().endsWith('.gif');
           } catch (e) {
             return interaction.reply({ content: `❌ Failed to download attachment: ${e.message}`, ephemeral: true });
@@ -376,7 +387,7 @@ client.on('interactionCreate', async (interaction) => {
 
         const addResult = await addEmojiToDatabase(name, imageBuffer, animated);
         if (!addResult.success) return interaction.reply({ content: `❌ ${addResult.error}`, ephemeral: true });
-        await interaction.reply(`✅ Emoji \`${addResult.name}\` added (animated: ${animated ? 'yes' : 'no'}).`);
+        await interaction.reply(`✅ Emoji \`${addResult.name}\` added (type: ${animated ? 'animated' : 'static'}).`);
         break;
       }
       case 'bot-delete-emoji': {
@@ -422,7 +433,8 @@ client.on('messageCreate', async (message) => {
       try {
         const resp = await axios.get(attachment.url, { responseType: 'arraybuffer' });
         imageBuffer = Buffer.from(resp.data);
-        const isGif = imageBuffer.length > 6 && imageBuffer[0] === 0x47 && imageBuffer[1] === 0x49 && imageBuffer[2] === 0x46 && (imageBuffer[3] === 0x38 && (imageBuffer[4] === 0x37 || imageBuffer[4] === 0x39) && imageBuffer[5] === 0x61);
+        const isGif = imageBuffer.length > 6 && imageBuffer[0] === 0x47 && imageBuffer[1] === 0x49 && imageBuffer[2] === 0x46 &&
+          (imageBuffer[3] === 0x38 && (imageBuffer[4] === 0x37 || imageBuffer[4] === 0x39) && imageBuffer[5] === 0x61);
         animated = isGif || attachment.contentType?.includes('gif') || attachment.name?.toLowerCase().endsWith('.gif');
       } catch (e) {
         return message.reply(`❌ Failed to download attachment: ${e.message}`);
@@ -438,7 +450,7 @@ client.on('messageCreate', async (message) => {
 
     const addResult = await addEmojiToDatabase(name, imageBuffer, animated);
     if (!addResult.success) return message.reply(`❌ ${addResult.error}`);
-    await message.reply(`✅ Emoji \`${addResult.name}\` added (animated: ${animated ? 'yes' : 'no'}).`);
+    await message.reply(`✅ Emoji \`${addResult.name}\` added (type: ${animated ? 'animated' : 'static'}).`);
     return;
   }
 
@@ -459,7 +471,9 @@ client.on('messageCreate', async (message) => {
       const search = args[0]?.toLowerCase();
       let emojis = Array.from(syncedEmoji.values()).filter(e => search ? e.name.toLowerCase().includes(search) : true);
       if (emojis.length === 0) return message.reply('❌ No emojis found!');
-      const list = emojis.slice(0, 20).map(e => `<a:${e.name}:${e.id}> \`${e.name}\``).join('\n');
+
+      // Use helper function for correct format
+      const list = emojis.slice(0, 20).map(e => `${formatEmoji(e)} \`${e.name}\``).join('\n');
       const more = emojis.length > 20 ? `\n*...and ${emojis.length - 20} more*` : '';
       message.reply({ embeds: [{ title: `🎭 Synced Emojis (${emojis.length})`, description: list + more, color: 0x5865F2 }] });
       break;
@@ -483,19 +497,24 @@ client.on('messageCreate', async (message) => {
       break;
     }
     case 'help':
-    case ' commands': {
+    case 'commands': {
       message.reply({ embeds: [{
         title: '🎭 Emoji Bot Commands',
         description: `
 **Prefix: \`${CONFIG.prefix}\`**
-📥 \`${CONFIG.prefix}sync\` - Sync (owner)
-📋 \`${CONFIG.prefix}emojis [search]\` - List
-📦 \`${CONFIG.prefix}add <name>\` - Add to server
-🎭 \`${CONFIG.prefix}use <name>\` - Use emoji
-🔧 \`${CONFIG.prefix}botadd <name> <url>\` - Add to DB (owner)
-🔧 \`${CONFIG.prefix}botdel <name>\` - Delete from DB (owner)
 
-⚡ Slash commands: /sync-emojis, /list-emojis, /add-emoji, /use-emoji, /emoji-info, /bot-add-emoji, /bot-delete-emoji
+📥 **Owner Commands**
+\`${CONFIG.prefix}sync\` - Sync all emojis from source
+\`${CONFIG.prefix}botadd <name> <url|attachment>\` - Add emoji to bot
+\`${CONFIG.prefix}botdel <name>\` - Delete emoji from bot
+
+📋 **Public Commands**
+\`${CONFIG.prefix}emojis [search]\` - List all emojis
+\`${CONFIG.prefix}add <name>\` - Add emoji to this server
+\`${CONFIG.prefix}use <name>\` - Use emoji in chat
+
+⚡ **Slash Commands**
+/sync-emojis, /list-emojis, /add-emoji, /use-emoji, /emoji-info, /bot-add-emoji, /bot-delete-emoji
         `,
         color: 0x5865F2
       }] });
